@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+*.vsix
+.env
+.env.*
+.DS_Store
+.test-output/
