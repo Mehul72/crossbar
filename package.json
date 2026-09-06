@@ -3,7 +3,7 @@
   "displayName": "Crossbar",
   "description": "One chat for your coding agents.",
   "version": "0.1.0",
-  "publisher": "crossbar-local",
+  "publisher": "MehulFursule",
   "license": "MIT",
   "engines": {
     "vscode": "^1.136.0",
