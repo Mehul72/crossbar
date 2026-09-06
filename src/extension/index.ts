@@ -1,10 +1,14 @@
 import * as vscode from "vscode";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { ConversationStore } from "../storage/conversations";
 import { ChatEngine } from "../conversations/engine";
 import { CodexProvider } from "../providers/codex/provider";
-import { ClaudeProvider } from "../providers/claude/provider";
+import {
+  ClaudeProvider,
+  type ClaudeConfiguration,
+} from "../providers/claude/provider";
 import { ChatView } from "./view";
 import type { Provider, ProviderId } from "../shared/domain";
 import { redact } from "../providers/runtime";
@@ -41,18 +45,33 @@ export async function activate(
     },
     log,
   );
+  const claudeExecutable = () => {
+    const configured = config().get<string>("claudePath", "claude");
+    if (configured !== "claude") return configured;
+    const extension = vscode.extensions.getExtension("anthropic.claude-code");
+    if (extension) {
+      const bundled = join(
+        extension.extensionPath,
+        "resources",
+        "native-binary",
+        process.platform === "win32" ? "claude.exe" : "claude",
+      );
+      if (existsSync(bundled)) return bundled;
+    }
+    return configured;
+  };
   const sdk = (await import(
     pathToFileURL(join(__dirname, "claude-sdk.mjs")).href
   )) as typeof import("@anthropic-ai/claude-agent-sdk");
   const claude = new ClaudeProvider(
-    () => config().get<string>("claudePath", "claude"),
+    claudeExecutable,
     () => root.fsPath,
     sdk.query,
     (approval, signal) => view.approve(approval, signal),
     async () => {
       const terminal = vscode.window.createTerminal({
         name: "Claude login",
-        shellPath: config().get<string>("claudePath", "claude"),
+        shellPath: claudeExecutable(),
         shellArgs: ["auth", "login"],
         cwd: root.fsPath,
       });
@@ -63,6 +82,7 @@ export async function activate(
       );
     },
     log,
+    () => config().get<ClaudeConfiguration>("claudeConfiguration", "full"),
   );
   const providers = new Map<ProviderId, Provider>([
     ["codex", codex],

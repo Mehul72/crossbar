@@ -15,7 +15,7 @@ const providers = [new CodexProvider(() => process.env.CROSSBAR_CODEX_PATH || 'c
 try {
   for (const provider of providers) {
     const status = await provider.status();
-    process.stdout.write(JSON.stringify({ provider: provider.id, state: status.state, detail: status.detail, modelCount: status.models.length, usageAvailable: !!status.usage }) + '\\n');
+    process.stdout.write(JSON.stringify({ provider: provider.id, state: status.state, detail: status.detail, modelCount: status.models.length, usageAvailable: !!status.usage, quota: status.usage?.quota, efforts: status.models.map(model => ({ model: model.id, levels: model.efforts.map(option => option.id), default: model.defaultEffort })) }) + '\\n');
     if (process.argv.includes('--turn') && status.state === 'connected') {
       let text = '';
       let sessionId: string | undefined;

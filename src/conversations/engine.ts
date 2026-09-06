@@ -19,6 +19,11 @@ import {
 import { verifyClaims } from "../verification/claims";
 import { errorMessage } from "../providers/runtime";
 
+export interface GenerationTarget {
+  provider: ProviderId;
+  model: string;
+  effort?: string;
+}
 export class ChatEngine {
   chat: Conversation;
   statuses: ProviderStatus[] = [];
@@ -161,9 +166,8 @@ export class ChatEngine {
   async send(
     requestId: string,
     text: string,
-    providerId: ProviderId,
-    model: string,
-    otherModel?: string,
+    target: GenerationTarget,
+    other?: Omit<GenerationTarget, "provider">,
     modelReview = false,
   ): Promise<void> {
     this.assertIdle();
@@ -185,20 +189,19 @@ export class ChatEngine {
         message: user,
       });
       this.emit({ type: "attachments", attachments: [] });
-      const targets = [{ id: providerId, model }];
-      if (otherModel)
+      const targets: GenerationTarget[] = [target];
+      if (other)
         targets.push({
-          id: providerId === "codex" ? "claude" : "codex",
-          model: otherModel,
+          ...other,
+          provider: target.provider === "codex" ? "claude" : "codex",
         });
       const promptSnapshot = structuredClone(this.chat);
-      const tasks = targets.map((target) =>
+      const tasks = targets.map((each) =>
         this.generate(
           promptSnapshot,
-          target.id,
-          target.model,
+          each,
           controller.signal,
-          otherModel ? requestId : undefined,
+          other ? requestId : undefined,
           modelReview,
         ),
       );
@@ -206,7 +209,7 @@ export class ChatEngine {
       for (const result of results)
         if (result.status === "rejected")
           this.emit({ type: "error", message: errorMessage(result.reason) });
-      if (otherModel) this.chat.sessions = [];
+      if (other) this.chat.sessions = [];
       this.chat.updatedAt = Date.now();
       await this.store.save(this.chat);
     } finally {
@@ -215,16 +218,17 @@ export class ChatEngine {
   }
   private async generate(
     snapshot: Conversation,
-    providerId: ProviderId,
-    model: string,
+    target: GenerationTarget,
     signal: AbortSignal,
     compareGroup?: string,
     modelReview = false,
   ): Promise<void> {
+    const { provider: providerId, model, effort } = target;
     const message = createMessage("assistant", "");
     Object.assign(message, {
       provider: providerId,
       model,
+      effort,
       compareGroup,
       modelReview,
     });
@@ -279,7 +283,7 @@ export class ChatEngine {
       const prompt = syncPrompt(snapshot, session);
       let sessionId = session?.id;
       for await (const event of provider.send(
-        { prompt, model, sessionId, cwd: snapshot.workspace },
+        { prompt, model, effort, sessionId, cwd: snapshot.workspace },
         signal,
       )) {
         signal.throwIfAborted();
@@ -292,7 +296,17 @@ export class ChatEngine {
           flush();
           if (event.type === "session") sessionId = event.id;
           if (event.type === "model") message.model = event.model;
-          if (event.type === "usage") message.usage = event.usage;
+          if (event.type === "usage") {
+            message.usage = { ...message.usage, ...event.usage };
+            if (event.usage.quota) {
+              this.statuses = this.statuses.map((status) =>
+                status.id === providerId
+                  ? { ...status, usage: { ...status.usage, ...event.usage } }
+                  : status,
+              );
+              this.emit({ type: "providers", providers: this.statuses });
+            }
+          }
           if (event.type === "tool") {
             const index = message.tools.findIndex(
               (tool) => tool.id === event.tool.id,

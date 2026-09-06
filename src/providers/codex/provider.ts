@@ -28,8 +28,19 @@ const capabilities: Capabilities = {
 };
 const rateWindow = z.object({
   usedPercent: z.number(),
+  windowDurationMins: z.number().nullable().optional(),
   resetsAt: z.number().nullable().optional(),
 });
+// "primary" and "secondary" mean nothing to a reader, so name the window by its length.
+export function windowName(durationMins: number | null | undefined): string {
+  if (!durationMins || durationMins <= 0) return "Rate limit";
+  if (durationMins % 1440 === 0) {
+    const days = durationMins / 1440;
+    return days === 7 ? "Weekly limit" : `${days}-day limit`;
+  }
+  if (durationMins % 60 === 0) return `${durationMins / 60}-hour limit`;
+  return `${durationMins}-minute limit`;
+}
 export function codexQuota(value: unknown): Usage {
   const limits = z
     .object({
@@ -40,19 +51,51 @@ export function codexQuota(value: unknown): Usage {
   return {
     observedAt: Date.now(),
     source: "provider",
-    quota: Object.entries(limits).flatMap(([name, window]) =>
-      window
-        ? [
-            {
-              name,
-              remaining: Math.max(0, Math.min(100, 100 - window.usedPercent)),
-              resetsAt: window.resetsAt ? window.resetsAt * 1000 : undefined,
-            },
-          ]
-        : [],
-    ),
+    quota: Object.entries(limits).flatMap(([key, window]) => {
+      if (!window) return [];
+      const remaining = Math.max(0, Math.min(100, 100 - window.usedPercent));
+      return [
+        {
+          name: window.windowDurationMins
+            ? windowName(window.windowDurationMins)
+            : key,
+          remaining,
+          resetsAt: window.resetsAt ? window.resetsAt * 1000 : undefined,
+          state:
+            remaining <= 0
+              ? ("exhausted" as const)
+              : remaining <= 10
+                ? ("warning" as const)
+                : ("ok" as const),
+        },
+      ];
+    }),
   };
 }
+// Codex names its levels in free-form strings, so present them without assuming a fixed set.
+const effortName = (effort: string): string =>
+  effort.charAt(0).toUpperCase() + effort.slice(1);
+const modelPage = z.object({
+  data: z.array(
+    z.object({
+      id: z.string(),
+      model: z.string(),
+      displayName: z.string(),
+      description: z.string().optional(),
+      hidden: z.boolean().optional(),
+      supportedReasoningEfforts: z
+        .array(
+          z.object({
+            reasoningEffort: z.string(),
+            description: z.string().optional(),
+          }),
+        )
+        .optional(),
+      defaultReasoningEffort: z.string().optional(),
+    }),
+  ),
+  nextCursor: z.string().nullable(),
+});
 const turnError = z.object({
   message: z.string(),
   additionalDetails: z.string().nullable().optional(),
@@ -152,37 +195,29 @@ export class CodexProvider implements Provider {
       const models: Model[] = [];
       let cursor: string | null = null;
       for (let page = 0; page < 20; page++) {
-        const response: {
-          data: {
-            id: string;
-            model: string;
-            displayName: string;
-            hidden?: boolean;
-          }[];
-          nextCursor: string | null;
-        } = z
-          .object({
-            data: z.array(
-              z.object({
-                id: z.string(),
-                model: z.string(),
-                displayName: z.string(),
-                hidden: z.boolean().optional(),
-              }),
-            ),
-            nextCursor: z.string().nullable(),
-          })
-          .parse(
-            await rpc.request("model/list", {
-              cursor,
-              limit: 100,
-              includeHidden: false,
-            }),
-          );
+        const response = modelPage.parse(
+          await rpc.request("model/list", {
+            cursor,
+            limit: 100,
+            includeHidden: false,
+          }),
+        );
         models.push(
           ...response.data
             .filter((model) => !model.hidden)
-            .map((model) => ({ id: model.model, name: model.displayName })),
+            .map((model) => ({
+              id: model.model,
+              name: model.displayName,
+              description: model.description,
+              efforts: (model.supportedReasoningEfforts ?? []).map(
+                (option) => ({
+                  id: option.reasoningEffort,
+                  name: effortName(option.reasoningEffort),
+                  description: option.description,
+                }),
+              ),
+              defaultEffort: model.defaultReasoningEffort,
+            })),
         );
         cursor = response.nextCursor;
         if (!cursor) break;
@@ -299,6 +334,7 @@ export class CodexProvider implements Provider {
         await rpc.request("turn/start", {
           threadId,
           model: input.model,
+          ...(input.effort ? { effort: input.effort } : {}),
           input: [{ type: "text", text: input.prompt }],
         }),
       );

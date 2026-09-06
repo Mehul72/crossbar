@@ -7,7 +7,7 @@ import {
   type HostMessage,
   type WebviewMessage,
 } from "../shared/messages";
-import { collectContext, openLink } from "./context";
+import { collectContext, collectDroppedFiles, openLink } from "./context";
 import { errorMessage, redact } from "../providers/runtime";
 
 export class ChatView implements vscode.WebviewViewProvider, vscode.Disposable {
@@ -38,6 +38,8 @@ export class ChatView implements vscode.WebviewViewProvider, vscode.Disposable {
         );
     }
     void this.view?.webview.postMessage(event);
+    if (event.type === "busy" && !event.busy && this.view?.visible)
+      void this.refreshProviders().catch((error) => this.fail(error));
   }
   async resolveWebviewView(view: vscode.WebviewView): Promise<void> {
     this.view = view;
@@ -89,6 +91,7 @@ export class ChatView implements vscode.WebviewViewProvider, vscode.Disposable {
   async attach(kind: "current" | "selection"): Promise<void> {
     await this.engine.attach(await collectContext(this.root, kind));
     await this.show();
+    this.post({ type: "composer" });
   }
   approve(approval: Approval, signal: AbortSignal): Promise<Decision> {
     if (signal.aborted || !this.view) return Promise.resolve("deny");
@@ -148,9 +151,17 @@ export class ChatView implements vscode.WebviewViewProvider, vscode.Disposable {
         await this.engine.send(
           message.requestId,
           message.text,
-          message.provider,
-          message.model,
-          message.compare ? (message.otherModel ?? "default") : undefined,
+          {
+            provider: message.provider,
+            model: message.model,
+            effort: message.effort,
+          },
+          message.compare
+            ? {
+                model: message.otherModel ?? "default",
+                effort: message.otherEffort,
+              }
+            : undefined,
         );
         break;
       case "stop":
@@ -178,6 +189,12 @@ export class ChatView implements vscode.WebviewViewProvider, vscode.Disposable {
       }
       case "attach":
         await this.engine.attach(await collectContext(this.root, message.kind));
+        break;
+      case "dropFiles":
+        this.engine.assertIdle();
+        await this.engine.attach(
+          await collectDroppedFiles(this.root, message.uris, message.files),
+        );
         break;
       case "removeAttachment":
         await this.engine.removeAttachment(message.id);
@@ -217,8 +234,7 @@ export class ChatView implements vscode.WebviewViewProvider, vscode.Disposable {
         await this.engine.send(
           randomUUID(),
           `Review this ${response.provider} response for mistakes and missing evidence. This is model review, not objective verification.\n\n${response.content}`,
-          message.provider,
-          message.model,
+          { provider: message.provider, model: message.model },
           undefined,
           true,
         );

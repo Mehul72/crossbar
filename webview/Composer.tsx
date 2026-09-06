@@ -3,13 +3,15 @@ import type { ProviderId } from "../src/shared/domain";
 import type { HostMessage } from "../src/shared/messages";
 import type { State } from "./state";
 import { post, vscode } from "./bridge";
+import { resetLabel, tightestWindow } from "../src/verification/claims";
+import { droppedFiles, isFileDrop } from "./drop";
 const commands = ["/summary", "/compare", "/context", "/usage", "/new"];
 export function Composer({
   state,
   panel,
 }: {
   state: State;
-  panel: (name: "settings" | "usage") => void;
+  panel: (name?: "settings" | "usage") => void;
 }) {
   const saved = vscode.getState();
   const [draft, setDraft] = useState(saved?.draft ?? "");
@@ -19,7 +21,13 @@ export function Composer({
   const [models, setModels] = useState<Partial<Record<ProviderId, string>>>(
     saved?.models ?? {},
   );
+  const [efforts, setEfforts] = useState<Partial<Record<ProviderId, string>>>(
+    saved?.efforts ?? {},
+  );
   const [compare, setCompare] = useState(false);
+  const [dropError, setDropError] = useState<string>();
+  const [attaching, setAttaching] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const [pending, setPending] = useState(false);
   const [contextMenu, setContextMenu] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -34,8 +42,23 @@ export function Composer({
       : (list[0]?.id ?? "");
   };
   const model = modelFor(provider);
+  const selected = status?.models.find((item) => item.id === model);
+  const effortsFor = (id: ProviderId) =>
+    state.providers
+      .find((item) => item.id === id)
+      ?.models.find((item) => item.id === modelFor(id))?.efforts ?? [];
+  // A level chosen for one model is meaningless on another, so only send one the
+  // currently selected model actually offers.
+  const effortFor = (id: ProviderId) => {
+    const chosen = efforts[id];
+    return chosen && effortsFor(id).some((option) => option.id === chosen)
+      ? chosen
+      : undefined;
+  };
   useEffect(() => {
     const listener = (event: MessageEvent<HostMessage>) => {
+      if (event.data.type === "attachments" || event.data.type === "error")
+        setAttaching(false);
       if (event.data.type === "composer") {
         if (event.data.provider) setProvider(event.data.provider);
         if (event.data.compare !== undefined) setCompare(event.data.compare);
@@ -61,8 +84,8 @@ export function Composer({
     return () => window.removeEventListener("message", listener);
   }, []);
   useEffect(() => {
-    vscode.setState({ draft, provider, models });
-  }, [draft, provider, models]);
+    vscode.setState({ draft, provider, models, efforts });
+  }, [draft, provider, models, efforts]);
   useEffect(() => {
     const textarea = input.current;
     if (textarea) {
@@ -71,6 +94,7 @@ export function Composer({
     }
   }, [draft]);
   const send = () => {
+    if (attaching) return;
     if (state.busy || pending || !draft.trim()) return;
     if (commands.includes(draft.trim())) {
       switch (draft.trim()) {
@@ -100,6 +124,7 @@ export function Composer({
     const requestId = crypto.randomUUID();
     pendingId.current = requestId;
     setPending(true);
+    panel(undefined);
     post({
       type: "send",
       requestId,
@@ -107,15 +132,72 @@ export function Composer({
       provider,
       model,
       compare,
-      ...(compare ? { otherModel: modelFor(other) || "default" } : {}),
+      ...(effortFor(provider) ? { effort: effortFor(provider) } : {}),
+      ...(compare
+        ? {
+            otherModel: modelFor(other) || "default",
+            ...(effortFor(other) ? { otherEffort: effortFor(other) } : {}),
+          }
+        : {}),
     });
   };
+  // A spent limit is the reason the next send will fail, so surface it in the composer
+  // rather than leaving it in a panel the user has no reason to open.
+  const tightest = tightestWindow(status?.usage?.quota);
+  const spent = tightest?.state === "exhausted" ? tightest : undefined;
   const suggestions =
     draft.startsWith("/") && !draft.includes(" ")
       ? commands.filter((command) => command.startsWith(draft))
       : [];
   return (
-    <footer className="composer">
+    <footer
+      className={`composer${dragging ? " dragging" : ""}`}
+      onDragOver={(event) => {
+        if (!isFileDrop(event.dataTransfer)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect =
+          state.busy || attaching ? "none" : "copy";
+        setDragging(!state.busy && !attaching);
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+          setDragging(false);
+      }}
+      onDrop={(event) => {
+        if (!isFileDrop(event.dataTransfer)) return;
+        event.preventDefault();
+        setDragging(false);
+        if (state.busy || attaching) {
+          setDropError(
+            "Wait for the current operation to finish before attaching files.",
+          );
+          return;
+        }
+        setDropError(undefined);
+        setAttaching(true);
+        void droppedFiles(event.dataTransfer)
+          .then((message) => post(message))
+          .catch((error) => {
+            setAttaching(false);
+            setDropError(
+              error instanceof Error
+                ? error.message
+                : "Could not attach dropped files.",
+            );
+          });
+      }}
+    >
+      {dragging && (
+        <div className="drop-hint">
+          Drop files to attach to your next message
+        </div>
+      )}
+      {attaching && <div role="status">Attaching files…</div>}
+      {dropError && (
+        <div role="alert" className="error">
+          {dropError}
+        </div>
+      )}
       <div className="attachments">
         {state.chat?.attachments.map((item) => (
           <details className="attachment" key={item.id}>
@@ -174,7 +256,12 @@ export function Composer({
         placeholder="Ask about your code…"
         onChange={(event) => setDraft(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+          // An IME uses Enter to accept a candidate, so never send mid-composition.
+          if (
+            event.key === "Enter" &&
+            !event.shiftKey &&
+            !event.nativeEvent.isComposing
+          ) {
             event.preventDefault();
             send();
           }
@@ -208,7 +295,7 @@ export function Composer({
         ) : (
           <button
             className="primary"
-            disabled={pending || !draft.trim()}
+            disabled={pending || attaching || !draft.trim()}
             onClick={send}
           >
             Send
@@ -271,7 +358,32 @@ export function Composer({
             )}
           </select>
         </label>
+        {!!effortsFor(provider).length && (
+          <label className="effort-select">
+            <span className="sr-only">Reasoning effort</span>
+            <select
+              value={efforts[provider] ?? ""}
+              onChange={(event) =>
+                setEfforts({ ...efforts, [provider]: event.target.value })
+              }
+            >
+              <option value="">Effort: default</option>
+              {effortsFor(provider).map((option) => (
+                <option
+                  key={option.id}
+                  value={option.id}
+                  title={option.description}
+                >
+                  Effort: {option.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
+      {selected?.description && (
+        <p className="model-description">{selected.description}</p>
+      )}
       {compare && (
         <div className="compare-options">
           <p>Sends to both providers and uses both quotas.</p>
@@ -295,13 +407,43 @@ export function Composer({
               )}
             </select>
           </label>
+          {!!effortsFor(other).length && (
+            <label>
+              Effort
+              <select
+                aria-label="Comparison reasoning effort"
+                value={efforts[other] ?? ""}
+                onChange={(event) =>
+                  setEfforts({ ...efforts, [other]: event.target.value })
+                }
+              >
+                <option value="">Model default</option>
+                {effortsFor(other).map((option) => (
+                  <option
+                    key={option.id}
+                    value={option.id}
+                    title={option.description}
+                  >
+                    {option.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
         </div>
       )}
       <div className="composer-hint" id="composer-hint">
-        <span>⌘ / Ctrl + Enter to send</span>
-        <button className="quiet" onClick={() => panel("settings")}>
-          {status?.state === "connected" ? "Connected" : "Connect provider"}
-        </button>
+        <span>Enter to send · Shift + Enter for a new line</span>
+        {spent ? (
+          <button className="quiet quota-spent" onClick={() => panel("usage")}>
+            {provider === "codex" ? "Codex" : "Claude"} limit reached ·{" "}
+            {resetLabel(spent.resetsAt).replace("Resets ", "resets ")}
+          </button>
+        ) : (
+          <button className="quiet" onClick={() => panel("settings")}>
+            {status?.state === "connected" ? "Connected" : "Connect provider"}
+          </button>
+        )}
       </div>
     </footer>
   );

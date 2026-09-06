@@ -27,18 +27,18 @@ export const claimSchema = z.object({
   evidence: z.string(),
 });
 export type Claim = z.infer<typeof claimSchema>;
+// Some runtime events report only a status; subscription snapshots include percentages.
+export const quotaWindowSchema = z.object({
+  name: z.string(),
+  remaining: z.number().optional(),
+  resetsAt: z.number().optional(),
+  state: z.enum(["ok", "warning", "exhausted"]).optional(),
+});
+export type QuotaWindow = z.infer<typeof quotaWindowSchema>;
 export const usageSchema = z.object({
   observedAt: z.number(),
   source: z.literal("provider"),
-  quota: z
-    .array(
-      z.object({
-        name: z.string(),
-        remaining: z.number(),
-        resetsAt: z.number().optional(),
-      }),
-    )
-    .optional(),
+  quota: z.array(quotaWindowSchema).optional(),
   context: z.object({ used: z.number(), limit: z.number() }).optional(),
   tokens: z.object({ input: z.number(), output: z.number() }).optional(),
 });
@@ -50,6 +50,7 @@ export const messageSchema = z.object({
   createdAt: z.number(),
   provider: providerId.optional(),
   model: z.string().optional(),
+  effort: z.string().optional(),
   status: z.enum(["streaming", "completed", "failed", "cancelled"]),
   error: z.string().optional(),
   attachments: z.array(attachmentSchema).default([]),
@@ -85,9 +86,19 @@ export type ConversationSummary = Pick<
   Conversation,
   "id" | "title" | "updatedAt" | "workspace"
 >;
+export interface EffortOption {
+  id: string;
+  name: string;
+  description?: string;
+}
 export interface Model {
   id: string;
   name: string;
+  description?: string;
+  // Empty when the model exposes no reasoning control, which is not the same as
+  // one whose levels we failed to read; both providers report this per model.
+  efforts: EffortOption[];
+  defaultEffort?: string;
 }
 export interface Capabilities {
   models: boolean;
@@ -125,6 +136,7 @@ export type ProviderEvent =
 export interface ProviderInput {
   prompt: string;
   model: string;
+  effort?: string;
   sessionId?: string;
   cwd: string;
   readOnly?: boolean;

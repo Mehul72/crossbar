@@ -10,6 +10,8 @@ import {
   type ProviderStatus,
 } from "./domain";
 const id = z.string().min(1).max(200);
+// Forwarded verbatim into a runtime RPC, so keep it to the shape a level name can take.
+const effort = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]{0,31}$/);
 export const webviewMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("ready") }),
   z.object({
@@ -18,8 +20,10 @@ export const webviewMessage = z.discriminatedUnion("type", [
     text: z.string().trim().min(1).max(100_000),
     provider: providerId,
     model: id,
+    effort: effort.optional(),
     compare: z.boolean(),
     otherModel: id.optional(),
+    otherEffort: effort.optional(),
   }),
   z.object({ type: z.literal("stop") }),
   z.object({ type: z.literal("new") }),
@@ -44,6 +48,32 @@ export const webviewMessage = z.discriminatedUnion("type", [
       "editors",
     ]),
   }),
+  z
+    .object({
+      type: z.literal("dropFiles"),
+      uris: z.array(z.string().min(1).max(4096)).max(20),
+      files: z
+        .array(
+          z.object({
+            name: z
+              .string()
+              .min(1)
+              .max(255)
+              .refine(
+                (name) =>
+                  !/[\\/]/.test(name) &&
+                  [...name].every((char) => char.charCodeAt(0) >= 32),
+              ),
+            content: z.string().max(150_000),
+          }),
+        )
+        .max(20),
+    })
+    .refine(
+      (value) =>
+        value.uris.length + value.files.length > 0 &&
+        value.uris.length + value.files.length <= 20,
+    ),
   z.object({ type: z.literal("removeAttachment"), id }),
   z.object({ type: z.literal("summary"), provider: providerId, model: id }),
   z.object({

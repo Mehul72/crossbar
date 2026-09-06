@@ -13,15 +13,24 @@ provider actually reported rather than a guess.
   prefer as the one that continues the thread.
 - Context Capsules: summarise a long thread into a structured attachment and
   continue from it when a session gets close to its context limit.
-- Attach the current file or selection, with attachments contained to the
-  workspace folder.
+- Attach workspace files or selections, or drop text files from your file manager.
+- Per-model reasoning effort. Each model advertises its own levels, and the
+  composer offers only those, defaulting to the model's own setting.
+- The selected model names itself. "Default (recommended)" shows the provider's
+  own description underneath, so you always know what will actually run.
+- Enter sends, Shift + Enter starts a new line.
 - Tool calls, command output and diffs are shown as the runtime reports them,
   with approvals prompted in VS Code before anything runs.
-- Usage and quota come from the provider itself. Nothing is estimated.
+- Usage and quota come from the provider itself. Nothing is estimated. When a
+  limit is spent, the composer says so and when it lifts, instead of failing on
+  your next send.
+- Your local Claude Code configuration applies by default, so your skills,
+  CLAUDE.md, hooks and MCP servers work as they do in the terminal.
 
 ## Requirements
 
-- VS Code 1.95 or newer, desktop.
+- VS Code 1.136 or newer, desktop. Crossbar lives in the secondary
+  sidebar, alongside Claude Code and Codex, which needs that version.
 - Node.js 20.19 or newer to build.
 - A trusted, local, single-folder workspace. Crossbar stays inert in an untrusted
   or virtual workspace.
@@ -42,7 +51,8 @@ That produces `crossbar-0.1.0.vsix`. Install it with
 
 ## Connecting providers
 
-Open the Crossbar view in the activity bar, then **Provider settings**.
+Open the secondary sidebar (View: Toggle Secondary Side Bar), pick the
+**Crossbar** tab, then **Provider settings**.
 
 - **Codex** connects through the Codex CLI's own ChatGPT login. If Crossbar
   reports Codex as missing, the CLI is not on `PATH`. Set `crossbar.codexPath`
@@ -51,15 +61,33 @@ Open the Crossbar view in the activity bar, then **Provider settings**.
   `~/.vscode/extensions/openai.chatgpt-<version>/bin/macos-aarch64/codex`.
 - **Claude** connects through the Claude Code executable and the Agent SDK,
   using the subscription login already on the machine. Set `crossbar.claudePath`
-  if `claude` is not on `PATH`.
+  to choose an executable explicitly. By default Crossbar uses the runtime bundled
+  with the official Claude Code extension, falling back to `claude` on `PATH`.
+  The bundled runtime supports numeric subscription usage; older CLIs may not.
 
 Settings:
 
-| Setting                       | Default  | Purpose                                                |
-| ----------------------------- | -------- | ------------------------------------------------------ |
-| `crossbar.codexPath`          | `codex`  | Codex executable.                                      |
-| `crossbar.claudePath`         | `claude` | Claude Code executable.                                |
-| `crossbar.turnTimeoutSeconds` | `600`    | Maximum generation time, including waits for approval. |
+| Setting                        | Default  | Purpose                                                              |
+| ------------------------------ | -------- | -------------------------------------------------------------------- |
+| `crossbar.codexPath`           | `codex`  | Codex executable.                                                    |
+| `crossbar.claudePath`          | `claude` | Claude Code executable.                                              |
+| `crossbar.claudeConfiguration` | `full`   | How much of your local Claude Code configuration each session loads. |
+| `crossbar.turnTimeoutSeconds`  | `600`    | Maximum generation time, including waits for approval.               |
+
+### Claude configuration modes
+
+`crossbar.claudeConfiguration` decides how much of your machine's Claude Code
+setup a session loads. Verified command counts in a directory with a large skill
+library installed: `full` and `skills` both see 144, `isolated` sees 15.
+
+| Mode             | Skills and CLAUDE.md | Hooks | Configured MCP servers |
+| ---------------- | -------------------- | ----- | ---------------------- |
+| `full` (default) | yes                  | yes   | yes                    |
+| `skills`         | yes                  | no    | no                     |
+| `isolated`       | no                   | no    | no                     |
+
+Hooks run shell commands without a Crossbar approval prompt, since they are your
+own configuration. Choose `skills` if you want your skills without that.
 
 ## Limitations
 
@@ -79,10 +107,25 @@ These are deliberate, not pending work.
   the provider runtimes do.
 - **Not published.** The package identifier is `crossbar` with a local
   publisher. No Marketplace name is claimed or reserved.
-- **Quota display depends on the provider.** Codex reports rate limit windows
-  with reset times, so those are shown. The Claude SDK reports token counts per
-  turn but no remaining-quota figure, so Crossbar shows tokens and says the
-  quota is unavailable rather than estimating one.
+- **Effort levels are the provider's, not ours.** Crossbar lists exactly what
+  each model reports and sends nothing when you leave it on default. The sets
+  differ per model, so a level chosen for one model is dropped rather than
+  forced onto another that does not offer it. Models with no levels show no
+  control.
+- **Usage refreshes automatically.** Opening Usage requests current information,
+  then refreshes every minute while visible and after responses. Claude and Codex
+  show remaining percentages and reset times for their 5-hour and weekly windows
+  when the runtime supplies them. Missing percentages are labelled unavailable;
+  failed refreshes retain the last reading, which is marked stale after five minutes.
+  Claude uses the pinned SDK's experimental structured usage request without
+  submitting a model prompt; older runtimes may provide only limit status.
+
+To attach context, drop text files onto the composer from VS Code Explorer or
+from your file manager. Explorer paths must stay inside the workspace. File-manager
+uploads attach the bytes you explicitly drop. Each file is limited to 150 KB;
+attachments together are limited to 20 items and 400,000 characters. Binary files
+are not supported. To attach an excerpt, select it in the editor, right-click,
+and choose **Add to Crossbar chat**. Review or remove attachments before sending.
 
 ## Data
 

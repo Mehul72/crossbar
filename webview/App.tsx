@@ -8,6 +8,8 @@ import { Panels } from "./Panels";
 export function App() {
   const [state, dispatch] = useReducer(reduce, initialState);
   const [panel, setPanel] = useState<"settings" | "usage" | "history">();
+  // A disabled button alone reads as broken, so hold a label until the host is done.
+  const [summarising, setSummarising] = useState(false);
   const [following, setFollowing] = useState(true);
   const scroll = useRef<HTMLElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -16,6 +18,14 @@ export function App() {
     const receive = (event: MessageEvent<HostMessage>) => {
       dispatch(event.data);
       if (event.data.type === "panel") setPanel(event.data.panel);
+      // Watching busy alone would strand the label when two updates batch into no
+      // net change, so end it on whatever the summary produces instead.
+      if (
+        (event.data.type === "busy" && !event.data.busy) ||
+        event.data.type === "attachments" ||
+        event.data.type === "error"
+      )
+        setSummarising(false);
     };
     window.addEventListener("message", receive);
     post({ type: "ready" });
@@ -149,21 +159,31 @@ export function App() {
                 <span>{state.chat.title}</span>
                 <button
                   disabled={state.busy}
+                  aria-busy={summarising}
                   onClick={() => {
                     const last = state
                       .chat!.messages.filter(
                         (message) => message.provider && message.model,
                       )
                       .at(-1);
-                    if (last?.provider && last.model)
+                    if (last?.provider && last.model) {
+                      setSummarising(true);
                       post({
                         type: "summary",
                         provider: last.provider,
                         model: last.model,
                       });
+                    }
                   }}
                 >
-                  Summarise & continue
+                  {summarising ? (
+                    <>
+                      <span className="spinner" aria-hidden="true" />
+                      Summarising…
+                    </>
+                  ) : (
+                    "Summarise & continue"
+                  )}
                 </button>
               </div>
               {state.total > state.chat.messages.length && (

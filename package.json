@@ -6,7 +6,7 @@
   "publisher": "crossbar-local",
   "license": "MIT",
   "engines": {
-    "vscode": "^1.95.0",
+    "vscode": "^1.136.0",
     "node": ">=20.19.0"
   },
   "categories": [
@@ -35,7 +35,7 @@
   ],
   "contributes": {
     "viewsContainers": {
-      "activitybar": [
+      "secondarySidebar": [
         {
           "id": "crossbar",
           "title": "Crossbar",
@@ -79,7 +79,7 @@
       },
       {
         "command": "crossbar.addSelection",
-        "title": "Crossbar: Add Selection"
+        "title": "Add to Crossbar chat"
       },
       {
         "command": "crossbar.summarise",
@@ -107,7 +107,23 @@
           "type": "string",
           "default": "claude",
           "scope": "machine",
-          "description": "Claude Code executable path."
+          "description": "Claude Code executable path. The default uses the official Claude Code extension runtime when installed, otherwise claude on PATH."
+        },
+        "crossbar.claudeConfiguration": {
+          "type": "string",
+          "enum": [
+            "full",
+            "skills",
+            "isolated"
+          ],
+          "default": "full",
+          "scope": "machine",
+          "enumDescriptions": [
+            "Behave like the claude CLI: your skills, CLAUDE.md, hooks and configured MCP servers all load.",
+            "Load your skills and CLAUDE.md, but keep hooks disabled and ignore configured MCP servers.",
+            "Load none of your Claude Code configuration."
+          ],
+          "description": "How much of your local Claude Code configuration each session loads."
         },
         "crossbar.turnTimeoutSeconds": {
           "type": "number",
@@ -117,6 +133,15 @@
           "description": "Maximum generation time, including approval waits."
         }
       }
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "crossbar.addSelection",
+          "when": "editorHasSelection && resourceScheme == file && isWorkspaceTrusted",
+          "group": "navigation@100"
+        }
+      ]
     }
   },
   "scripts": {
@@ -147,7 +172,7 @@
     "@types/node": "26.4.1",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.7",
-    "@types/vscode": "1.95.0",
+    "@types/vscode": "1.136.0",
     "@vscode/vsce": "3.9.2",
     "agent-browser": "0.36.0",
     "esbuild": "0.28.2",

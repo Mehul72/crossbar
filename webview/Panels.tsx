@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 import type { State } from "./state";
 import { post } from "./bridge";
-import { resetLabel, usageLabel } from "../src/verification/claims";
+import {
+  resetLabel,
+  usageLabel,
+  windowLabel,
+} from "../src/verification/claims";
 export function Panels({
   panel,
   state,
@@ -16,6 +20,19 @@ export function Panels({
     const timer = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(timer);
   }, []);
+  useEffect(() => {
+    if (panel !== "usage") return;
+    const refresh = () => {
+      if (!document.hidden) post({ type: "refresh" });
+    };
+    refresh();
+    const timer = setInterval(refresh, 60_000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [panel]);
   const [search, setSearch] = useState("");
   const [renaming, setRenaming] = useState<string>();
   const [title, setTitle] = useState("");
@@ -165,13 +182,43 @@ export function Panels({
                 ) : (
                   <>
                     <p>{usageLabel(provider.usage, now)}</p>
-                    {provider.usage?.quota?.map((window) => (
-                      <p key={window.name}>
-                        {window.name}: {window.remaining.toFixed(0)}% remaining
+                    {(provider.id === "claude"
+                      ? ["5-hour limit", "Weekly limit"]
+                          .map(
+                            (name) =>
+                              provider.usage?.quota?.find(
+                                (window) => window.name === name,
+                              ) ?? { name },
+                          )
+                          .concat(
+                            provider.usage?.quota?.filter(
+                              (window) =>
+                                !["5-hour limit", "Weekly limit"].includes(
+                                  window.name,
+                                ),
+                            ) ?? [],
+                          )
+                      : provider.usage?.quota
+                    )?.map((window) => (
+                      <p
+                        key={window.name}
+                        className={
+                          window.state === "exhausted"
+                            ? "quota-spent"
+                            : undefined
+                        }
+                      >
+                        {windowLabel(window)}
                         <br />
                         <small>{resetLabel(window.resetsAt, now)}</small>
                       </p>
                     ))}
+                    {provider.id === "claude" && !provider.usage && (
+                      <p className="muted">
+                        Claude has not returned subscription usage yet. Usage
+                        refreshes automatically.
+                      </p>
+                    )}
                     <p>
                       Context:{" "}
                       {last?.usage?.context

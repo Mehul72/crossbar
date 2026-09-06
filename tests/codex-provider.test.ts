@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CodexProvider, codexQuota, turnErrorReason } from '../src/providers/codex/provider';
+import { CodexProvider, codexQuota, turnErrorReason, windowName } from '../src/providers/codex/provider';
 import { startProcess } from '../src/providers/runtime';
 import type { RpcFrame } from '../src/providers/codex/rpc';
 import type { Approve, Decision } from '../src/shared/domain';
@@ -11,10 +11,17 @@ const params = (frame: RpcFrame) => frame.params as Record<string, unknown>;
 
 describe('codexQuota', () => {
   it('converts provider reset seconds to milliseconds and clamps remaining percentages', () => {
-    expect(codexQuota({ primary: { usedPercent: 30, resetsAt: 1234 }, secondary: { usedPercent: 120 } })).toMatchObject({ source: 'provider', quota: [{ name: 'primary', remaining: 70, resetsAt: 1234000 }, { name: 'secondary', remaining: 0 }] });
+    expect(codexQuota({ primary: { usedPercent: 30, resetsAt: 1234 }, secondary: { usedPercent: 120 } })).toMatchObject({ source: 'provider', quota: [{ name: 'primary', remaining: 70, resetsAt: 1234000, state: 'ok' }, { name: 'secondary', remaining: 0, state: 'exhausted' }] });
     expect(codexQuota({ primary: { usedPercent: -10 } }).quota?.[0]?.remaining).toBe(100);
     expect(codexQuota({ primary: null, secondary: null }).quota).toEqual([]);
     expect(() => codexQuota({ primary: { usedPercent: 'unknown' } })).toThrow();
+  });
+  it('names a window by how long it lasts and falls back to the raw key', () => {
+    expect(codexQuota({ primary: { usedPercent: 0, windowDurationMins: 300 }, secondary: { usedPercent: 95, windowDurationMins: 10080 } }).quota?.map(window => [window.name, window.state])).toEqual([['5-hour limit', 'ok'], ['Weekly limit', 'warning']]);
+    expect(codexQuota({ primary: { usedPercent: 0 } }).quota?.[0]?.name).toBe('primary');
+    expect(windowName(90)).toBe('90-minute limit');
+    expect(windowName(2880)).toBe('2-day limit');
+    expect(windowName(null)).toBe('Rate limit');
   });
 });
 
@@ -39,7 +46,7 @@ describe('CodexProvider', () => {
       switch (frame.method) {
         case 'initialize': child.reply(frame, {}); break;
         case 'account/read': child.reply(frame, { account }); break;
-        case 'model/list': child.reply(frame, params(frame).cursor ? { data: [{ id: 'second', model: 'second-model', displayName: 'Second' }], nextCursor: null } : { data: [{ id: 'first', model: 'codex-model', displayName: 'Codex' }, { id: 'hidden', model: 'hidden-model', displayName: 'Hidden', hidden: true }], nextCursor: 'page-2' }); break;
+        case 'model/list': child.reply(frame, params(frame).cursor ? { data: [{ id: 'second', model: 'second-model', displayName: 'Second' }], nextCursor: null } : { data: [{ id: 'first', model: 'codex-model', displayName: 'Codex', description: 'Fast general model', supportedReasoningEfforts: [{ reasoningEffort: 'low', description: 'Fastest' }, { reasoningEffort: 'xhigh', description: 'Deepest' }], defaultReasoningEffort: 'low' }, { id: 'hidden', model: 'hidden-model', displayName: 'Hidden', hidden: true }], nextCursor: 'page-2' }); break;
         case 'account/rateLimits/read': if (quotaFails) child.reject(frame); else child.reply(frame, { rateLimits: { primary: { usedPercent: 25, resetsAt: 2000 } } }); break;
         case 'thread/start': child.reply(frame, { thread: { id: 'thread-1' } }); break;
         case 'thread/resume': if (resumeFails) child.reject(frame); else child.reply(frame, { thread: { id: 'thread-1' } }); break;
@@ -61,6 +68,18 @@ describe('CodexProvider', () => {
     await provider.status();
     expect(startProcess).toHaveBeenCalledTimes(1);
     expect(startProcess).toHaveBeenCalledWith('/bin/codex', ['app-server'], '/workspace');
+  });
+  it('reports the reasoning levels and default each model advertises', async () => {
+    const [first, second] = (await provider.status()).models;
+    expect(first).toEqual({ id: 'codex-model', name: 'Codex', description: 'Fast general model', efforts: [{ id: 'low', name: 'Low', description: 'Fastest' }, { id: 'xhigh', name: 'Xhigh', description: 'Deepest' }], defaultEffort: 'low' });
+    expect(second).toEqual({ id: 'second-model', name: 'Second', description: undefined, efforts: [], defaultEffort: undefined });
+  });
+  it('sends the chosen reasoning effort with the turn and omits it when unset', async () => {
+    await collect(provider.send({ ...input, effort: 'xhigh' }, new AbortController().signal));
+    expect(params(child.frames.find(frame => frame.method === 'turn/start')!)).toMatchObject({ model: 'codex-model', effort: 'xhigh' });
+    child.frames.length = 0;
+    await collect(provider.send(input, new AbortController().signal));
+    expect(params(child.frames.find(frame => frame.method === 'turn/start')!)).not.toHaveProperty('effort');
   });
   it('retains the last observed quota timestamp when a later quota request fails', async () => {
     const first = await provider.status(); quotaFails = true;

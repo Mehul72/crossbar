@@ -370,13 +370,18 @@ summary {
 }
 .selectors {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
 }
 .selectors label {
   min-width: 0;
 }
+/* The sidebar is narrow, so the model keeps the room and effort drops to its own row. */
 .model-select {
-  flex: 1;
+  flex: 1 1 120px;
+}
+.effort-select {
+  flex: 0 1 auto;
 }
 .selectors select {
   width: 100%;
@@ -590,4 +595,52 @@ summary {
 body.vscode-high-contrast button,
 body.vscode-high-contrast-light button {
   border-color: var(--vscode-contrastBorder);
+}
+
+.quota-spent {
+  color: var(--vscode-errorForeground);
+}
+.tool-status {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--vscode-descriptionForeground);
+}
+.tool-status.failed {
+  color: var(--vscode-errorForeground);
+}
+.model-description {
+  margin: 4px 0 0;
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+}
+.spinner {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 5px;
+  vertical-align: -1px;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 3s;
+  }
+}
+
+.composer.dragging {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: -2px;
+}
+.drop-hint {
+  padding: 8px;
+  color: var(--vscode-foreground);
 }

@@ -36,9 +36,37 @@ const providers = ["codex", "claude"].map((id) => ({
     {
       id: `${id}-test-model`,
       name: id === "codex" ? "Account model" : "Sonnet",
+      description:
+        id === "codex" ? "GPT-6 · Everyday coding" : "Sonnet 4.6 · Balanced",
+      // Only one side advertises levels, so both the present and absent cases render.
+      efforts:
+        id === "codex"
+          ? [
+              { id: "low", name: "Low", description: "Fastest" },
+              { id: "xhigh", name: "Xhigh", description: "Deepest" },
+            ]
+          : [],
+      ...(id === "codex" ? { defaultEffort: "low" } : {}),
     },
   ],
   capabilities,
+  // Codex is out of its window; Claude has not reported one yet.
+  ...(id === "codex"
+    ? {
+        usage: {
+          observedAt: Date.now(),
+          source: "provider",
+          quota: [
+            {
+              name: "5-hour limit",
+              remaining: 0,
+              state: "exhausted",
+              resetsAt: Date.now() + 3 * 3_600_000,
+            },
+          ],
+        },
+      }
+    : {}),
 }));
 const themes = {
   dark: {
@@ -148,12 +176,30 @@ try {
       .fill("Explain this function\nKeep it concise.");
     await page
       .getByRole("textbox", { name: "Message Crossbar" })
-      .press("Control+Enter");
+      .press("Shift+Enter");
+    assert.equal(
+      await page.evaluate(
+        () => window.__sent.filter((message) => message.type === "send").length,
+      ),
+      0,
+      "Shift+Enter must insert a newline rather than send",
+    );
+    await page
+      .getByRole("textbox", { name: "Message Crossbar" })
+      .fill("Explain this function\nKeep it concise.");
+    await page
+      .getByRole("textbox", { name: "Message Crossbar" })
+      .press("Enter");
     const sent = await page.evaluate(() =>
       window.__sent.find((message) => message.type === "send"),
     );
     assert.equal(sent.text, "Explain this function\nKeep it concise.");
     assert.equal(sent.compare, false);
+    assert.equal(
+      sent.effort,
+      undefined,
+      "no effort is sent until one is chosen",
+    );
     const user = {
       id: sent.requestId,
       role: "user",
@@ -180,6 +226,13 @@ try {
           command: "npm test",
           exitCode: 0,
           output: "12 tests passed",
+        },
+        {
+          id: "read",
+          title: "Read",
+          status: "failed",
+          output:
+            "EISDIR: illegal operation on a directory, read '/workspace/memory'",
         },
       ],
       verification: [
@@ -211,6 +264,127 @@ try {
         .inputValue(),
       "",
     );
+    const effort = page.getByRole("combobox", { name: "Reasoning effort" });
+    await effort.selectOption("xhigh");
+    await page
+      .getByRole("textbox", { name: "Message Crossbar" })
+      .fill("With deeper reasoning");
+    await page
+      .getByRole("textbox", { name: "Message Crossbar" })
+      .press("Control+Enter");
+    assert.equal(
+      await page.evaluate(
+        () =>
+          window.__sent.filter((message) => message.type === "send").at(-1)
+            .effort,
+      ),
+      "xhigh",
+      "the chosen effort travels with the send",
+    );
+    await page
+      .getByRole("combobox", { name: "Provider" })
+      .selectOption("claude");
+    assert.equal(
+      await page.getByRole("combobox", { name: "Reasoning effort" }).count(),
+      0,
+      "a model without levels shows no effort control",
+    );
+    await page
+      .getByRole("combobox", { name: "Provider" })
+      .selectOption("codex");
+    // A greyed-out button alone reads as broken, so the label has to change.
+    await page.getByRole("button", { name: "Summarise & continue" }).click();
+    await page.getByRole("button", { name: /Summarising/ }).waitFor();
+    assert.equal(
+      await page.evaluate(() => window.__sent.at(-1).type),
+      "summary",
+    );
+    await page.evaluate(() =>
+      window.postMessage({ type: "busy", busy: true }, "*"),
+    );
+    await page.evaluate(() =>
+      window.postMessage({ type: "busy", busy: false }, "*"),
+    );
+    await page
+      .getByRole("button", { name: "Summarise & continue" })
+      .waitFor({ timeout: 5000 });
+    // The selected model has to name itself; "Default" alone tells nobody what runs.
+    await page.getByText("GPT-6 · Everyday coding").waitFor();
+    // Sending from a panel has to reveal the answer.
+    await page
+      .getByRole("button", { name: "Provider settings", exact: true })
+      .click();
+    await page
+      .getByRole("heading", { name: "Providers", exact: true })
+      .waitFor();
+    await page.evaluate(() =>
+      window.postMessage({ type: "busy", busy: false }, "*"),
+    );
+    await page
+      .getByRole("textbox", { name: "Message Crossbar" })
+      .fill("From inside a panel");
+    // The composer refuses a send while the previous one is still pending.
+    await page
+      .getByRole("button", { name: "Send" })
+      .waitFor({ state: "visible" });
+    await page.waitForFunction(
+      () => !document.querySelector("#prompt ~ * button[disabled]"),
+      { timeout: 5000 },
+    );
+    await page
+      .getByRole("textbox", { name: "Message Crossbar" })
+      .press("Enter");
+    assert.equal(
+      await page
+        .getByRole("heading", { name: "Providers", exact: true })
+        .isVisible(),
+      false,
+      "sending must leave the panel and show the conversation",
+    );
+    // A step the agent recovered from must not read as a failed answer.
+    await page.getByText("2 activities · 1 failed").click();
+    await page
+      .getByText(/A failed step is something the agent tried and worked around/)
+      .waitFor();
+    assert.equal(
+      await page.getByText("EISDIR", { exact: false }).first().isVisible(),
+      false,
+      "a failed step stays collapsed until opened",
+    );
+    await page.getByRole("group").filter({ hasText: "Read" }).last().click();
+    await page.getByText("EISDIR", { exact: false }).first().waitFor();
+    // A spent limit has to reach the composer, not sit inside a panel.
+    await page.getByRole("button", { name: /Codex limit reached/ }).waitFor();
+    await page.getByRole("button", { name: /Codex limit reached/ }).click();
+    await page.getByRole("heading", { name: "Usage & context" }).waitFor();
+    await page
+      .getByText("5-hour limit: 0% remaining (limit reached)")
+      .waitFor();
+    await page.getByText(/Resets in 2h 59m|Resets in 3h 0m/).waitFor();
+    await page
+      .getByText(/Claude has not returned subscription usage yet/)
+      .waitFor();
+    await page.evaluate(
+      (providers) => window.postMessage({ type: "providers", providers }, "*"),
+      providers.map((provider) =>
+        provider.id === "claude"
+          ? {
+              ...provider,
+              usage: {
+                observedAt: Date.now(),
+                source: "provider",
+                quota: [
+                  { name: "5-hour limit", remaining: 7 },
+                  { name: "Weekly limit", remaining: 33 },
+                ],
+              },
+            }
+          : provider,
+      ),
+    );
+    await page.getByText("5-hour limit: 7% remaining").waitFor();
+    await page.getByText("Weekly limit: 33% remaining").waitFor();
+    await page.getByRole("button", { name: "Close panel" }).click();
     assert.equal(await page.evaluate(() => window.__injected), undefined);
     assert.equal(await page.locator('a[href^="javascript:"]').count(), 0);
     await page
@@ -286,10 +460,96 @@ try {
       id: "approval-1",
       decision: "deny",
     });
+    await page.evaluate(() =>
+      window.postMessage({ type: "busy", busy: false }, "*"),
+    );
+    await page.getByRole("button", { name: "Send", exact: true }).waitFor();
+    await page.locator(".composer").evaluate((element) => {
+      const dataTransfer = new window.DataTransfer();
+      dataTransfer.items.add(
+        new window.File(["const dropped = true;"], "drop.ts", {
+          type: "text/plain",
+        }),
+      );
+      element.dispatchEvent(
+        new window.DragEvent("drop", {
+          bubbles: true,
+          cancelable: true,
+          dataTransfer,
+        }),
+      );
+    });
+    await page.waitForFunction(() =>
+      window.__sent.some((message) => message.type === "dropFiles"),
+    );
+    assert.deepEqual(
+      await page.evaluate(() =>
+        window.__sent.filter((message) => message.type === "dropFiles").at(-1),
+      ),
+      {
+        type: "dropFiles",
+        uris: [],
+        files: [{ name: "drop.ts", content: "const dropped = true;" }],
+      },
+    );
+    await page.evaluate(() =>
+      window.postMessage({ type: "attachments", attachments: [] }, "*"),
+    );
+    await page.getByText("Attaching files…").waitFor({ state: "hidden" });
+    await page.locator(".composer").evaluate((element) => {
+      const dataTransfer = new window.DataTransfer();
+      dataTransfer.setData(
+        "text/uri-list",
+        "# workspace file\r\nfile:///workspace/source.ts",
+      );
+      element.dispatchEvent(
+        new window.DragEvent("drop", {
+          bubbles: true,
+          cancelable: true,
+          dataTransfer,
+        }),
+      );
+    });
+    await page.waitForFunction(
+      () =>
+        window.__sent.filter((message) => message.type === "dropFiles")
+          .length === 2,
+    );
+    assert.deepEqual(
+      await page.evaluate(
+        () =>
+          window.__sent.filter((message) => message.type === "dropFiles").at(-1)
+            ?.uris,
+      ),
+      ["file:///workspace/source.ts"],
+    );
+    await page.clock.install();
+    await page.getByRole("button", { name: "Usage and context" }).click();
+    const refreshes = await page.evaluate(
+      () =>
+        window.__sent.filter((message) => message.type === "refresh").length,
+    );
+    await page.clock.fastForward(60_000);
+    assert.equal(
+      await page.evaluate(
+        () =>
+          window.__sent.filter((message) => message.type === "refresh").length,
+      ),
+      refreshes + 1,
+    );
+    await page.getByRole("button", { name: "Close panel" }).click();
+    await page.clock.fastForward(60_000);
+    assert.equal(
+      await page.evaluate(
+        () =>
+          window.__sent.filter((message) => message.type === "refresh").length,
+      ),
+      refreshes + 1,
+    );
     assert.deepEqual(errors, []);
     await context.close();
     process.stdout.write(
-      `${theme}: rendering, keyboard send/stop, compare, approvals, safe Markdown, copy, narrow layout and axe passed\n`,
+      `${theme}: rendering, enter-to-send, panel dismissal, effort selection, compare, approvals, safe Markdown, copy, narrow layout and axe passed\n`,
     );
   }
 } finally {

@@ -18,7 +18,7 @@ class TestProvider implements Provider {
   constructor(readonly id: ProviderId) {}
   async status(): Promise<ProviderStatus> {
     if (this.statusError) throw this.statusError;
-    return { id: this.id, state: this.state, detail: this.state, models: [{ id: 'model', name: 'Model' }], capabilities: { models: true, resume: true, quota: false, context: false, tools: true, diffs: true, approvals: true, cancellation: true } };
+    return { id: this.id, state: this.state, detail: this.state, models: [{ id: 'model', name: 'Model', efforts: [{ id: 'high', name: 'High' }] }], capabilities: { models: true, resume: true, quota: false, context: false, tools: true, diffs: true, approvals: true, cancellation: true } };
   }
   async connect(): Promise<void> { this.state = 'connected'; }
   async disconnect(): Promise<void> { this.state = 'disconnected'; }
@@ -57,11 +57,11 @@ describe('ChatEngine', () => {
 
   it.each([['codex', 'claude'], ['claude', 'codex']] as const)('preserves context through %s to %s and back', async (first, second) => {
     const providers = { codex, claude };
-    await engine.send('request-1', 'first request', first, 'first-model');
-    await engine.send('request-2', 'second request', second, 'second-model');
+    await engine.send('request-1', 'first request', { provider: first, model: 'first-model' });
+    await engine.send('request-2', 'second request', { provider: second, model: 'second-model' });
     expect(contents(providers[second].inputs[0])).toEqual(['first request', `${first} answer 1`, 'second request']);
     expect(providers[second].inputs[0]?.sessionId).toBeUndefined();
-    await engine.send('request-3', 'third request', first, 'first-model');
+    await engine.send('request-3', 'third request', { provider: first, model: 'first-model' });
     expect(providers[first].inputs[1]?.sessionId).toBe(`${first}-session-1`);
     expect(contents(providers[first].inputs[1])).toEqual(['second request', `${second} answer 1`, 'third request']);
     expect((await store.load(engine.chat.id)).messages).toHaveLength(6);
@@ -70,51 +70,64 @@ describe('ChatEngine', () => {
   });
 
   it('changes the requested model while preserving the established session context', async () => {
-    await engine.send('one', 'first', 'codex', 'old-model');
-    await engine.send('two', 'next', 'codex', 'new-model');
+    await engine.send('one', 'first', { provider: 'codex', model: 'old-model' });
+    await engine.send('two', 'next', { provider: 'codex', model: 'new-model' });
     expect(codex.inputs[1]).toMatchObject({ model: 'new-model', sessionId: 'codex-session-1' });
     expect(contents(codex.inputs[1])).toEqual(['next']);
     expect(engine.chat.messages.at(-1)?.model).toBe('new-model');
   });
 
   it('reseeds a stale session from canonical history without requesting a broken resume', async () => {
-    await engine.send('one', 'first', 'codex', 'model');
+    await engine.send('one', 'first', { provider: 'codex', model: 'model' });
     engine.chat.sessions[0]!.syncedThrough = 'missing';
-    await engine.send('two', 'next', 'codex', 'model');
+    await engine.send('two', 'next', { provider: 'codex', model: 'model' });
     expect(codex.inputs[1]?.sessionId).toBeUndefined();
     expect(contents(codex.inputs[1])).toEqual(['first', 'codex answer 1', 'next']);
     expect(engine.chat.sessions[0]?.syncedThrough).toBe(engine.chat.messages.at(-1)?.id);
   });
 
   it('retains a failed resume as one failed answer and starts fresh on the next explicit request', async () => {
-    await engine.send('one', 'first', 'claude', 'model');
+    await engine.send('one', 'first', { provider: 'claude', model: 'model' });
     claude.scripts.push(async function* () { yield { type: 'text', text: 'partial' }; throw new Error('Session expired'); });
-    await engine.send('two', 'resume', 'claude', 'model');
+    await engine.send('two', 'resume', { provider: 'claude', model: 'model' });
     expect(claude.inputs).toHaveLength(2);
     expect(engine.chat.messages.at(-1)).toMatchObject({ status: 'failed', content: 'partial', error: 'Session expired' });
     expect(engine.chat.sessions).toEqual([]);
-    await engine.send('three', 'try again', 'claude', 'model');
+    await engine.send('three', 'try again', { provider: 'claude', model: 'model' });
     expect(claude.inputs[2]?.sessionId).toBeUndefined();
     expect(contents(claude.inputs[2])).toEqual(['first', 'claude answer 1', 'resume', 'try again']);
   });
 
   it('deduplicates a completed request ID after persistence and reopening', async () => {
-    await engine.send('request', 'do work', 'codex', 'model');
+    await engine.send('request', 'do work', { provider: 'codex', model: 'model' });
     await engine.initialize(engine.chat.id);
-    await engine.send('request', 'do work', 'codex', 'model');
+    await engine.send('request', 'do work', { provider: 'codex', model: 'model' });
     expect(codex.inputs).toHaveLength(1);
     expect(engine.chat.messages).toHaveLength(2);
   });
 
+  it('routes each side of a comparison to its own reasoning effort and records it on the reply', async () => {
+    await engine.send('compare', 'compare answers', { provider: 'codex', model: 'model', effort: 'high' }, { model: 'other-model', effort: 'low' });
+    expect(codex.inputs[0]?.effort).toBe('high');
+    expect(claude.inputs[0]?.effort).toBe('low');
+    const replies = (await store.load(engine.chat.id)).messages.filter(message => message.role === 'assistant');
+    expect(replies.map(message => message.effort)).toEqual(['high', 'low']);
+  });
+  it('leaves effort unset when none is chosen', async () => {
+    await engine.send('plain', 'no effort', { provider: 'codex', model: 'model' });
+    expect(codex.inputs[0]?.effort).toBeUndefined();
+    expect(engine.chat.messages.find(message => message.role === 'assistant')?.effort).toBeUndefined();
+  });
+
   it('compares from the same input snapshot and persists choosing a canonical response', async () => {
-    await engine.send('compare', 'compare answers', 'codex', 'model', 'other-model');
+    await engine.send('compare', 'compare answers', { provider: 'codex', model: 'model' }, { model: 'other-model' });
     expect(contents(codex.inputs[0])).toEqual(['compare answers']);
     expect(contents(claude.inputs[0])).toEqual(['compare answers']);
     expect(engine.chat.messages.filter(message => message.compareGroup === 'compare')).toHaveLength(2);
     expect(engine.chat.sessions).toEqual([]);
     const choice = engine.chat.messages.find(message => message.provider === 'claude')!;
     await engine.choose(choice.id);
-    await engine.send('next', 'continue chosen', 'codex', 'model');
+    await engine.send('next', 'continue chosen', { provider: 'codex', model: 'model' });
     expect(contents(codex.inputs[1])).toEqual(['compare answers', 'claude answer 1', 'continue chosen']);
     expect((await store.load(engine.chat.id)).messages.find(message => message.provider === 'codex')?.excluded).toBe(true);
   });
@@ -122,7 +135,7 @@ describe('ChatEngine', () => {
   it.each(['failure', 'disconnected'] as const)('preserves the successful comparison when the other provider is %s', async scenario => {
     if (scenario === 'disconnected') { claude.state = 'disconnected'; await engine.refresh(); }
     else claude.scripts.push(async function* () { yield { type: 'text', text: 'partial' }; throw new Error('quota reached'); });
-    await engine.send('compare', 'compare', 'codex', 'model', 'model');
+    await engine.send('compare', 'compare', { provider: 'codex', model: 'model' }, { model: 'model' });
     expect(engine.chat.messages.find(message => message.provider === 'codex')).toMatchObject({ status: 'completed', content: 'codex answer 1' });
     expect(engine.chat.messages.find(message => message.provider === 'claude')?.status).toBe('failed');
     expect(claude.inputs).toHaveLength(scenario === 'failure' ? 1 : 0);
@@ -141,18 +154,31 @@ describe('ChatEngine', () => {
       signal.throwIfAborted();
     };
     codex.scripts.push(script); claude.scripts.push(script);
-    const pending = engine.send('compare', 'compare', 'codex', 'model', 'model');
+    const pending = engine.send('compare', 'compare', { provider: 'codex', model: 'model' }, { model: 'model' });
     await ready;
     expect(engine.busy).toBe(true);
     expect(() => engine.assertIdle()).toThrow('Stop the current generation');
     await expect(engine.newChat()).rejects.toThrow('Stop the current generation');
-    await expect(engine.send('another', 'duplicate concurrent work', 'codex', 'model')).rejects.toThrow('Stop the current generation');
+    await expect(engine.send('another', 'duplicate concurrent work', { provider: 'codex', model: 'model' })).rejects.toThrow('Stop the current generation');
     engine.stop(); await pending;
     expect(engine.chat.messages.filter(message => message.role === 'assistant').map(message => [message.status, message.content])).toEqual([['cancelled', 'partial'], ['cancelled', 'partial']]);
     expect(engine.busy).toBe(false);
     expect(engine.chat.sessions).toEqual([]);
     expect(codex.inputs).toHaveLength(1);
     expect(claude.inputs).toHaveLength(1);
+  });
+
+  it('pushes subscription windows to the UI during a turn without a status refresh', async () => {
+    const quota = [{ name: '5-hour limit', remaining: 70 }, { name: 'Weekly limit', remaining: 35 }];
+    claude.scripts.push(async function* () {
+      yield { type: 'usage', usage: { observedAt: 1, source: 'provider', quota } };
+      expect(events.filter(event => event.type === 'providers').at(-1)).toMatchObject({
+        providers: expect.arrayContaining([expect.objectContaining({ id: 'claude', usage: { observedAt: 1, source: 'provider', quota } })]),
+      });
+      yield { type: 'usage', usage: { observedAt: 2, source: 'provider', tokens: { input: 10, output: 5 } } };
+    });
+    await engine.send('usage', 'hello', { provider: 'claude', model: 'model' });
+    expect(engine.chat.messages.at(-1)?.usage).toMatchObject({ quota, tokens: { input: 10, output: 5 } });
   });
 
   it('merges tool result activity, records reported model and usage, and verifies claims against command evidence', async () => {
@@ -165,7 +191,7 @@ describe('ChatEngine', () => {
       yield { type: 'notice', text: 'Provider notice' };
       yield { type: 'text', text: 'Tests passed. Lint passed.' };
     });
-    await engine.send('one', 'verify', 'codex', 'requested-model', undefined, true);
+    await engine.send('one', 'verify', { provider: 'codex', model: 'requested-model' }, undefined, true);
     const answer = engine.chat.messages.at(-1)!;
     expect(answer).toMatchObject({ status: 'completed', model: 'actual-model', modelReview: true, usage: { tokens: { input: 20, output: 10 } } });
     expect(answer.tools).toEqual([{ id: 'tool', title: 'Run tests', command: 'npm test', status: 'completed', exitCode: 0, output: '19 passed' }]);
@@ -181,15 +207,15 @@ describe('ChatEngine', () => {
     await expect(engine.attach(Array.from({ length: 20 }, (_, index) => ({ ...attachment, id: String(index) })))).rejects.toThrow('Attachment limit');
     await expect(engine.attach([{ ...attachment, id: 'large', content: 'x'.repeat(400_001) }])).rejects.toThrow('Attachment limit');
     expect(engine.chat.attachments).toEqual([attachment]);
-    await engine.send('one', 'inspect', 'codex', 'model');
+    await engine.send('one', 'inspect', { provider: 'codex', model: 'model' });
     expect(engine.chat.messages[0]?.attachments).toEqual([attachment]);
     expect(engine.chat.attachments).toEqual([]);
-    await engine.send('two', 'continue', 'codex', 'model');
+    await engine.send('two', 'continue', { provider: 'codex', model: 'model' });
     expect(engine.chat.messages[2]?.attachments).toEqual([]);
   });
 
   it('creates a read-only summary in a linked conversation and allows removing its capsule', async () => {
-    await engine.send('one', 'build', 'codex', 'model');
+    await engine.send('one', 'build', { provider: 'codex', model: 'model' });
     const source = structuredClone(engine.chat);
     claude.scripts.push(async function* () { yield { type: 'text', text: '# Goal\n' }; yield { type: 'text', text: 'Finish build' }; });
     await engine.summarise('claude', 'summary-model');
@@ -205,7 +231,7 @@ describe('ChatEngine', () => {
 
   it('keeps the original conversation when summary generation fails or returns empty text', async () => {
     await expect(engine.summarise('codex', 'model')).rejects.toThrow('Start a conversation');
-    await engine.send('one', 'build', 'codex', 'model');
+    await engine.send('one', 'build', { provider: 'codex', model: 'model' });
     const original = structuredClone(engine.chat);
     claude.scripts.push(async function* () { yield { type: 'text', text: ' ' }; });
     await expect(engine.summarise('claude', 'model')).rejects.toThrow('empty summary');

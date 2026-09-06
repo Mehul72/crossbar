@@ -59,6 +59,9 @@ export const ChatMessage = memo(function ChatMessage({
 }) {
   const counts = { verified: 0, conflicting: 0, unverified: 0 };
   for (const claim of message.verification) counts[claim.status]++;
+  const failed = message.tools.filter(
+    (tool) => tool.status === "failed",
+  ).length;
   return (
     <article
       className={`message ${message.role}${message.excluded ? " excluded" : ""}`}
@@ -75,7 +78,10 @@ export const ChatMessage = memo(function ChatMessage({
               : "Claude"}
         </strong>
         {message.model && (
-          <span className="muted model-label">{message.model}</span>
+          <span className="muted model-label">
+            {message.model}
+            {message.effort ? ` · ${message.effort}` : ""}
+          </span>
         )}
         <span className="message-status">
           {message.status === "streaming"
@@ -114,18 +120,25 @@ export const ChatMessage = memo(function ChatMessage({
             message.status === "streaming"
               ? " · running"
               : ""}
+            {failed > 0 ? ` · ${failed} failed` : ""}
           </summary>
+          {failed > 0 && message.status === "completed" && (
+            <p className="muted">
+              A failed step is something the agent tried and worked around. The
+              answer above still completed.
+            </p>
+          )}
           {message.tools.map((tool) => (
             <details key={tool.id} className="tool">
               <summary>
-                <span>
+                {tool.title}{" "}
+                <span className={`tool-status ${tool.status}`}>
                   {tool.status === "completed"
-                    ? "✓"
+                    ? "done"
                     : tool.status === "failed"
-                      ? "!"
-                      : "·"}
-                </span>{" "}
-                {tool.title}
+                      ? "failed"
+                      : "running"}
+                </span>
               </summary>
               {tool.output && <pre>{tool.output}</pre>}
               {tool.exitCode !== undefined && <p>Exit code: {tool.exitCode}</p>}

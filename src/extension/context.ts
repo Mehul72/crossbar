@@ -38,15 +38,40 @@ async function fileAttachment(
   if (uri.scheme !== "file")
     throw new Error("Only local workspace files can be attached.");
   const path = await workspacePath(root, uri.fsPath);
-  if ((await stat(path)).size > MAX_FILE_BYTES)
+  const info = await stat(path);
+  if (!info.isFile()) throw new Error("Attach files, not folders.");
+  if (info.size > MAX_FILE_BYTES)
     throw new Error("This file exceeds 150 KB. Attach a selection instead.");
   const document = vscode.workspace.textDocuments.find(
     (document) => document.uri.toString() === uri.toString(),
   );
   const content = document?.getText() ?? (await readFile(path, "utf8"));
+  if (Buffer.byteLength(content, "utf8") > MAX_FILE_BYTES)
+    throw new Error("This file exceeds 150 KB. Attach a selection instead.");
   if (content.includes("\0"))
     throw new Error("Binary files cannot be attached as text.");
-  return attachment("file", relative(root, path), content);
+  return attachment("file", relative(await realpath(root), path), content);
+}
+export async function collectDroppedFiles(
+  root: string,
+  uris: string[],
+  files: { name: string; content: string }[],
+): Promise<Attachment[]> {
+  if (!vscode.workspace.isTrusted)
+    throw new Error("Trust this workspace before attaching context.");
+  const result: Attachment[] = [];
+  for (const uri of new Set(uris))
+    result.push(await fileAttachment(root, vscode.Uri.parse(uri)));
+  for (const file of files) {
+    if (Buffer.byteLength(file.content, "utf8") > MAX_FILE_BYTES)
+      throw new Error(
+        `${file.name} exceeds 150 KB. Attach a selection instead.`,
+      );
+    if (file.content.includes("\0"))
+      throw new Error("Binary files cannot be attached as text.");
+    result.push(attachment("file", file.name, file.content));
+  }
+  return result;
 }
 export async function collectContext(
   root: string,
@@ -135,7 +160,7 @@ export async function collectContext(
   return [
     attachment(
       "selection",
-      `${relative(root, path)}:${editor.selection.start.line + 1}-${editor.selection.end.line + 1}`,
+      `${relative(await realpath(root), path)}:${editor.selection.start.line + 1}-${editor.selection.end.line + 1}`,
       editor.document.getText(editor.selection),
     ),
   ];

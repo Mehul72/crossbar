@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type {
   query,
+  EffortLevel,
   SDKMessage,
   SDKUserMessage,
   Options,
@@ -14,6 +15,7 @@ import type {
   ProviderEvent,
   ProviderInput,
   ProviderStatus,
+  Usage,
 } from "../../shared/domain";
 import { EventQueue, errorMessage, redact, run } from "../runtime";
 
@@ -21,7 +23,7 @@ type QueryFactory = typeof query;
 const capabilities: Capabilities = {
   models: true,
   resume: true,
-  quota: false,
+  quota: true,
   context: false,
   tools: true,
   diffs: false,
@@ -90,6 +92,19 @@ export function resultReason(message: {
   return reported
     ? redact(reported).slice(0, 2000)
     : "Check subscription limits, model availability, and runtime authentication.";
+}
+export function supportedEffort(
+  models: Model[],
+  modelId: string,
+  requested: string | undefined,
+): EffortLevel | undefined {
+  if (!requested) return undefined;
+  const offered = models.find((model) => model.id === modelId)?.efforts ?? [];
+  // A match can only equal a level copied out of the SDK's own supportedEffortLevels
+  // for this model, so the narrowing holds without restating the union here.
+  return offered.some((option) => option.id === requested)
+    ? (requested as EffortLevel)
+    : undefined;
 }
 export function claudeEvents(
   message: SDKMessage,
@@ -183,11 +198,111 @@ export function claudeEvents(
   }
   return events;
 }
+const rateLimitInfo = z.object({
+  status: z.enum(["allowed", "allowed_warning", "rejected"]),
+  resetsAt: z.number().optional(),
+  rateLimitType: z.string().optional(),
+});
+const windowNames: Record<string, string> = {
+  five_hour: "5-hour limit",
+  seven_day: "Weekly limit",
+  seven_day_opus: "Weekly limit (Opus)",
+  seven_day_sonnet: "Weekly limit (Sonnet)",
+  seven_day_overage_included: "Weekly limit (with overage)",
+  overage: "Extra usage",
+};
+// The runtime reports which window applies and whether it is spent, but no percentage,
+// so record the state it gives rather than deriving a number it never sent.
+export function claudeQuota(value: unknown): Usage | undefined {
+  const parsed = rateLimitInfo.safeParse(value);
+  if (!parsed.success) return undefined;
+  const { status, resetsAt, rateLimitType } = parsed.data;
+  return {
+    observedAt: Date.now(),
+    source: "provider",
+    quota: [
+      {
+        name:
+          (rateLimitType && windowNames[rateLimitType]) ??
+          rateLimitType?.replaceAll("_", " ") ??
+          "Rate limit",
+        resetsAt: resetsAt ? resetsAt * 1000 : undefined,
+        state:
+          status === "rejected"
+            ? "exhausted"
+            : status === "allowed_warning"
+              ? "warning"
+              : "ok",
+      },
+    ],
+  };
+}
+const planWindow = z.object({
+  utilization: z.number().min(0).max(100).nullable(),
+  resets_at: z.string().nullable(),
+});
+const planUsage = z.object({
+  rate_limits_available: z.boolean(),
+  rate_limits: z
+    .object({
+      five_hour: planWindow.nullish(),
+      seven_day: planWindow.nullish(),
+      seven_day_opus: planWindow.nullish(),
+      seven_day_sonnet: planWindow.nullish(),
+    })
+    .nullable(),
+});
+export function claudePlanUsage(value: unknown): Usage | undefined {
+  const data = planUsage.parse(value);
+  if (!data.rate_limits_available || !data.rate_limits) return undefined;
+  const quota = Object.entries(data.rate_limits).flatMap(([key, window]) => {
+    if (!window) return [];
+    const reset = window.resets_at ? Date.parse(window.resets_at) : NaN;
+    return [
+      {
+        name: windowNames[key] ?? key,
+        remaining:
+          window.utilization === null ? undefined : 100 - window.utilization,
+        resetsAt: Number.isFinite(reset) ? reset : undefined,
+        state:
+          window.utilization === null
+            ? undefined
+            : window.utilization >= 100
+              ? ("exhausted" as const)
+              : ("ok" as const),
+      },
+    ];
+  });
+  return quota.length
+    ? { observedAt: Date.now(), source: "provider", quota }
+    : undefined;
+}
+export type ClaudeConfiguration = "full" | "skills" | "isolated";
+// Skills, CLAUDE.md and plugin commands all come from the on-disk setting sources;
+// omitting settingSources is what makes the session behave like the CLI.
+export function claudeConfigurationOptions(
+  configuration: ClaudeConfiguration,
+): Pick<
+  Options,
+  "settingSources" | "settings" | "strictMcpConfig" | "mcpServers"
+> {
+  if (configuration === "full") return {};
+  const withoutExtensions = {
+    settings: { disableAllHooks: true },
+    strictMcpConfig: true,
+    mcpServers: {},
+  };
+  return configuration === "skills"
+    ? withoutExtensions
+    : { ...withoutExtensions, settingSources: [] };
+}
 export class ClaudeProvider implements Provider {
   readonly id = "claude" as const;
   private running = new Set<ReturnType<QueryFactory>>();
   private models: Model[] = [];
   private modelsAt = 0;
+  private usage?: Usage;
+  private usageAttemptAt = 0;
   private disconnected = false;
   constructor(
     private executable: () => string,
@@ -196,6 +311,7 @@ export class ClaudeProvider implements Provider {
     private approve: Approve,
     private login: () => Promise<void>,
     private log: (text: string) => void,
+    private configuration: () => ClaudeConfiguration = () => "full",
   ) {}
   private options(controller: AbortController, cwd: string): Options {
     return {
@@ -204,10 +320,7 @@ export class ClaudeProvider implements Provider {
       abortController: controller,
       env: subscriptionEnvironment(process.env),
       permissionMode: "default",
-      settingSources: [],
-      settings: { disableAllHooks: true },
-      strictMcpConfig: true,
-      mcpServers: {},
+      ...claudeConfigurationOptions(this.configuration()),
       includePartialMessages: true,
       stderr: () => {
         /* Raw runtime stderr can contain authentication payloads. */
@@ -248,6 +361,33 @@ export class ClaudeProvider implements Provider {
     }
     assertSubscription(value);
   }
+  private async readUsage(query: ReturnType<QueryFactory>): Promise<void> {
+    this.usageAttemptAt = Date.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const value = await Promise.race([
+        query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({
+          skipBehaviors: true,
+        }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("Claude usage request timed out.")),
+            10_000,
+          );
+        }),
+      ]);
+      const usage = claudePlanUsage(value);
+      if (usage) this.usage = { ...this.usage, ...usage };
+      else
+        this.log(
+          "Claude subscription percentages are unavailable from the runtime.",
+        );
+    } catch (error) {
+      this.log(`Claude usage unavailable: ${errorMessage(error)}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
   async status(): Promise<ProviderStatus> {
     if (this.disconnected)
       return {
@@ -260,7 +400,9 @@ export class ClaudeProvider implements Provider {
       };
     try {
       await this.checkAuth();
-      if (Date.now() - this.modelsAt > 300_000 || !this.models.length) {
+      const discoverModels =
+        Date.now() - this.modelsAt > 300_000 || !this.models.length;
+      if (discoverModels || Date.now() - this.usageAttemptAt >= 60_000) {
         const controller = new AbortController();
         const prompts = new EventQueue<SDKUserMessage>();
         const query = this.factory({
@@ -273,19 +415,30 @@ export class ClaudeProvider implements Provider {
           query.close();
         }, 15_000);
         try {
-          this.models = (await query.supportedModels()).map((model) => ({
-            id: model.value,
-            name: model.displayName,
-          }));
-          this.modelsAt = Date.now();
+          if (discoverModels)
+            this.models = (await query.supportedModels()).map((model) => ({
+              id: model.value,
+              name: model.displayName,
+              description: model.description,
+              efforts: model.supportsEffort
+                ? (model.supportedEffortLevels ?? []).map((level) => ({
+                    id: level,
+                    name: level.charAt(0).toUpperCase() + level.slice(1),
+                  }))
+                : [],
+            }));
+          if (discoverModels) this.modelsAt = Date.now();
+          await this.readUsage(query);
         } catch (error) {
           this.log(
             `Claude model discovery unavailable: ${errorMessage(error)}`,
           );
+          // Effort levels are per model and unknown without discovery, so offer none
+          // rather than guess a set the selected model may reject.
           this.models = [
-            { id: "default", name: "Account default" },
-            { id: "sonnet", name: "Sonnet (runtime alias)" },
-            { id: "opus", name: "Opus (runtime alias)" },
+            { id: "default", name: "Account default", efforts: [] },
+            { id: "sonnet", name: "Sonnet (runtime alias)", efforts: [] },
+            { id: "opus", name: "Opus (runtime alias)", efforts: [] },
           ];
           this.modelsAt = Date.now();
         } finally {
@@ -301,6 +454,7 @@ export class ClaudeProvider implements Provider {
         detail: "Claude subscription · shared plan limits",
         models: this.models,
         capabilities,
+        usage: this.usage,
       };
     } catch (error) {
       const detail = errorMessage(error);
@@ -342,11 +496,15 @@ export class ClaudeProvider implements Provider {
     const controller = new AbortController();
     const prompts = new EventQueue<SDKUserMessage>();
     const options = this.options(controller, input.cwd);
+    // Sending a level the chosen model does not offer would be silently downgraded,
+    // so drop it and let the model's own default stand.
+    const effort = supportedEffort(this.models, input.model, input.effort);
     const query = this.factory({
       prompt: prompts,
       options: {
         ...options,
         model: input.model === "default" ? undefined : input.model,
+        ...(effort ? { effort } : {}),
         resume: input.sessionId,
         ...(input.readOnly ? { tools: [] } : {}),
       },
@@ -380,8 +538,30 @@ export class ClaudeProvider implements Provider {
       const streamed = new Set<string>();
       let completed = false;
       for await (const message of query) {
-        for (const event of claudeEvents(message, streamed)) yield event;
+        if (message.type === "rate_limit_event") {
+          const update = claudeQuota(message.rate_limit_info);
+          if (update) {
+            const windows = new Map(
+              this.usage?.quota?.map((window) => [window.name, window]),
+            );
+            for (const window of update.quota ?? [])
+              windows.set(window.name, window);
+            this.usage = {
+              ...this.usage,
+              ...update,
+              quota: [...windows.values()],
+            };
+            yield { type: "usage", usage: this.usage };
+          }
+        }
+        for (const event of claudeEvents(message, streamed)) {
+          if (event.type === "usage") {
+            this.usage = { ...this.usage, ...event.usage };
+            yield { type: "usage", usage: this.usage };
+          } else yield event;
+        }
         if (message.type === "result") {
+          this.usageAttemptAt = 0;
           completed = true;
           break;
         }
