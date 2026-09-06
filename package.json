@@ -1,0 +1,162 @@
+{
+  "name": "crossbar",
+  "displayName": "Crossbar",
+  "description": "One chat for your coding agents.",
+  "version": "0.1.0",
+  "publisher": "crossbar-local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0",
+    "node": ">=20.19.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Other"
+  ],
+  "keywords": [
+    "coding",
+    "agents",
+    "chat"
+  ],
+  "main": "./dist/extension.cjs",
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    },
+    "virtualWorkspaces": {
+      "supported": false
+    }
+  },
+  "activationEvents": [
+    "onView:crossbar.chat"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "crossbar",
+          "title": "Crossbar",
+          "icon": "media/crossbar.svg"
+        }
+      ]
+    },
+    "views": {
+      "crossbar": [
+        {
+          "type": "webview",
+          "id": "crossbar.chat",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "crossbar.open",
+        "title": "Crossbar: Open Chat"
+      },
+      {
+        "command": "crossbar.newChat",
+        "title": "Crossbar: New Chat"
+      },
+      {
+        "command": "crossbar.askCodex",
+        "title": "Crossbar: Ask Codex"
+      },
+      {
+        "command": "crossbar.askClaude",
+        "title": "Crossbar: Ask Claude"
+      },
+      {
+        "command": "crossbar.compare",
+        "title": "Crossbar: Compare Providers"
+      },
+      {
+        "command": "crossbar.addFile",
+        "title": "Crossbar: Add Current File"
+      },
+      {
+        "command": "crossbar.addSelection",
+        "title": "Crossbar: Add Selection"
+      },
+      {
+        "command": "crossbar.summarise",
+        "title": "Crossbar: Summarise & Continue"
+      },
+      {
+        "command": "crossbar.usage",
+        "title": "Crossbar: Show Usage"
+      },
+      {
+        "command": "crossbar.settings",
+        "title": "Crossbar: Provider Settings"
+      }
+    ],
+    "configuration": {
+      "title": "Crossbar",
+      "properties": {
+        "crossbar.codexPath": {
+          "type": "string",
+          "default": "codex",
+          "scope": "machine",
+          "description": "Codex executable path."
+        },
+        "crossbar.claudePath": {
+          "type": "string",
+          "default": "claude",
+          "scope": "machine",
+          "description": "Claude Code executable path."
+        },
+        "crossbar.turnTimeoutSeconds": {
+          "type": "number",
+          "default": 600,
+          "minimum": 30,
+          "maximum": 3600,
+          "description": "Maximum generation time, including approval waits."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src webview tests scripts",
+    "test": "vitest run",
+    "package": "npm run build && vsce package --no-dependencies --allow-missing-repository",
+    "vscode:prepublish": "npm run typecheck",
+    "format": "prettier --write src webview scripts tests *.json *.mjs .vscode docs README.md",
+    "test:webview": "npm run build && node scripts/verify-webview.mjs",
+    "test:vscode": "npm run build && node scripts/verify-vscode.mjs",
+    "check:runtimes": "node scripts/runtime-check.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.261",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "@eslint/js": "9.39.5",
+    "@playwright/test": "1.63.0",
+    "@types/node": "26.4.1",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "@types/vscode": "1.95.0",
+    "@vscode/vsce": "3.9.2",
+    "agent-browser": "0.36.0",
+    "esbuild": "0.28.2",
+    "eslint": "9.39.5",
+    "eslint-plugin-jsx-a11y": "6.10.2",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "prettier": "3.9.6",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.69.0",
+    "vitest": "5.0.0"
+  }
+}
